@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.find-tender.service.gov.uk)",
+      "WebSearch",
+      "Skill(claude-api)",
+      "Bash(uv init *)",
+      "Bash(uv add *)",
+      "Bash(~/.local/bin/uv add *)",
+      "Bash(~/.local/bin/uv run *)"
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+name: Tenderbot
+
+on:
+  schedule:
+    - cron: '0 7 * * 4'  # Every Thursday at 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore existing pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: public
+        continue-on-error: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tenderbot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: uv run python tenderbot.py --hours 168
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: public
+          branch: gh-pages
+          clean: false

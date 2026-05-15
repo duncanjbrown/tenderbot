@@ -18,9 +18,11 @@ DEFAULT_RESULTS_CACHE_PATH = ".tenderbot_results_cache.json"
 
 class TenderMatch(BaseModel):
     ocid: str
+    notice_id: str = ""
     title: str
     relevant: bool
     reason: str
+    value: str | None = None
 
 
 class BatchResult(BaseModel):
@@ -91,6 +93,7 @@ def summarise(release: dict) -> dict:
     buyer = release.get("buyer", {}) or {}
     value = tender.get("value", {}) or {}
     return {
+        "notice_id": release.get("id", ""),
         "ocid": release.get("ocid", ""),
         "title": tender.get("title") or "(no title)",
         "description": (tender.get("description") or "")[:400],
@@ -101,6 +104,14 @@ def summarise(release: dict) -> dict:
             else None
         ),
     }
+
+
+def enrich_matches(results: list[TenderMatch], releases: list[dict]) -> None:
+    summaries = {r.get("ocid", ""): summarise(r) for r in releases}
+    for match in results:
+        s = summaries.get(match.ocid, {})
+        match.notice_id = s.get("notice_id", "")
+        match.value = s.get("value")
 
 
 def evaluate(
@@ -150,15 +161,17 @@ def evaluate(
     return all_results
 
 
-def render_html(hits: list[TenderMatch], total: int, interests: str) -> str:
+def render_html(hits: list[TenderMatch], total: int, interests: str, hours: int = 24) -> str:
     from html import escape
     from datetime import date
 
     def card(match: TenderMatch) -> str:
+        url = escape(f"https://www.find-tender.service.gov.uk/Notice/{match.notice_id}")
+        value_html = f'<p class="value">{escape(match.value)}</p>' if match.value else ""
         return f"""
         <article>
-          <h2>{escape(match.title)}</h2>
-          <p class="ocid">{escape(match.ocid)}</p>
+          <h2><a href="{url}">{escape(match.title)}</a></h2>
+{value_html}
           <p class="reason">{escape(match.reason)}</p>
         </article>"""
 
@@ -182,7 +195,7 @@ def render_html(hits: list[TenderMatch], total: int, interests: str) -> str:
     main {{ max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }}
     article {{ background: #fff; border-radius: 8px; padding: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }}
     h2 {{ font-size: 1rem; font-weight: 600; margin-bottom: .5rem; }}
-    .ocid {{ font-size: .75rem; color: #888; margin-bottom: .5rem; font-family: monospace; }}
+.value {{ font-size: .875rem; color: #333; font-weight: 600; margin-bottom: .25rem; }}
     .reason {{ font-size: .875rem; color: #444; line-height: 1.4; }}
     .empty {{ max-width: 640px; margin: 0 auto; color: #666; }}
   </style>
@@ -191,13 +204,62 @@ def render_html(hits: list[TenderMatch], total: int, interests: str) -> str:
   <header>
     <h1>Tenderbot</h1>
     <p class="meta">{len(hits)} match(es) from {total} tenders &nbsp;·&nbsp; {escape(date.today().isoformat())}</p>
-    <p class="meta">Interests: {escape(interests)}</p>
+    <p class="meta">Last {hours} hours &nbsp;·&nbsp; Interests: {escape(interests)}</p>
   </header>
   <main>
     {body}
   </main>
 </body>
 </html>"""
+
+
+def render_index_html(dates: list[str]) -> str:
+    from html import escape
+
+    sorted_dates = sorted(dates, reverse=True)
+    if sorted_dates:
+        items = "\n".join(
+            f'    <li><a href="{escape(d)}/index.html">{escape(d)}</a></li>'
+            for d in sorted_dates
+        )
+        body = f"<ul>\n{items}\n  </ul>"
+    else:
+        body = "<p>No results yet.</p>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tenderbot</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; background: #f5f5f5; color: #1a1a1a; padding: 1rem; max-width: 640px; margin: 0 auto; }}
+    h1 {{ font-size: 1.25rem; font-weight: 700; margin-bottom: 1rem; }}
+    ul {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: .5rem; }}
+    li a {{ text-decoration: none; color: #1a6cbc; font-size: .9rem; }}
+    li a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <h1>Tenderbot</h1>
+  {body}
+</body>
+</html>"""
+
+
+def _update_public_index(public_dir: str) -> None:
+    import os
+    import re
+
+    date_pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    try:
+        entries = os.listdir(public_dir)
+    except FileNotFoundError:
+        entries = []
+    dates = [e for e in entries if date_pat.match(e) and os.path.isdir(os.path.join(public_dir, e))]
+    html = render_index_html(dates)
+    with open(os.path.join(public_dir, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
 
 
 def main() -> None:
@@ -214,11 +276,6 @@ def main() -> None:
         type=int,
         default=24,
         help="Hours back to search (default: 24)",
-    )
-    parser.add_argument(
-        "--output",
-        default="results.html",
-        help="Path to write HTML output (default: results.html)",
     )
     parser.add_argument(
         "--cache",
@@ -277,6 +334,7 @@ def main() -> None:
     print(f"Evaluating against interests: {args.interests}", file=sys.stderr)
     client = anthropic.Anthropic()
     results = evaluate(releases, args.interests, client)
+    enrich_matches(results, releases)
     save_results_cache(results, args.interests, args.results_cache)
     print(f"Results cached to {args.results_cache}.", file=sys.stderr)
 
@@ -285,24 +343,21 @@ def main() -> None:
 
 
 def _print_and_render(hits: list[TenderMatch], results: list[TenderMatch], args) -> None:
-    print(f"\n{'=' * 60}")
-    print(f"RESULTS: {len(hits)} match(es) out of {len(results)} tenders evaluated")
-    print(f"Interests: {args.interests}")
-    print("=" * 60)
+    import os
+    from datetime import date
 
-    if not hits:
-        print("\nNo matching tenders found.")
-    else:
-        for hit in hits:
-            print(f"\n• {hit.title}")
-            print(f"  {hit.ocid}")
-            print(f"  Why: {hit.reason}")
-        print()
+    today = date.today().isoformat()
+    out_dir = os.path.join("public", today)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "index.html")
 
-    html = render_html(hits, len(results), args.interests)
-    with open(args.output, "w", encoding="utf-8") as f:
+    html = render_html(hits, len(results), args.interests, hours=args.hours)
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"Results written to {args.output}", file=sys.stderr)
+    print(f"Results written to {out_path}", file=sys.stderr)
+
+    _update_public_index("public")
+    print("Index updated at public/index.html", file=sys.stderr)
 
 
 if __name__ == "__main__":

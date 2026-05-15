@@ -9,11 +9,13 @@ from tenderbot import (
     TENDER_TAGS,
     BatchResult,
     TenderMatch,
+    enrich_matches,
     evaluate,
     fetch_tenders,
     load_cache,
     load_results_cache,
     render_html,
+    render_index_html,
     save_cache,
     save_results_cache,
     summarise,
@@ -33,8 +35,8 @@ def _make_response(releases, next_url=None):
     return resp
 
 
-def _release(tags, ocid="ocds-test-001", title="Test Tender"):
-    return {"ocid": ocid, "tag": tags, "tender": {"title": title}, "buyer": {}}
+def _release(tags, ocid="ocds-test-001", title="Test Tender", notice_id="000001-2026"):
+    return {"id": notice_id, "ocid": ocid, "tag": tags, "tender": {"title": title}, "buyer": {}}
 
 
 class TestFetchTenders:
@@ -104,6 +106,7 @@ class TestFetchTenders:
 class TestSummarise:
     def test_extracts_key_fields(self):
         release = {
+            "id": "045104-2026",
             "ocid": "ocds-abc-123",
             "tender": {
                 "title": "Digital Health Platform",
@@ -113,6 +116,7 @@ class TestSummarise:
             "buyer": {"name": "NHS England"},
         }
         result = summarise(release)
+        assert result["notice_id"] == "045104-2026"
         assert result["ocid"] == "ocds-abc-123"
         assert result["title"] == "Digital Health Platform"
         assert result["description"] == "Build a new platform"
@@ -129,6 +133,7 @@ class TestSummarise:
 
     def test_handles_missing_fields_gracefully(self):
         result = summarise({})
+        assert result["notice_id"] == ""
         assert result["title"] == "(no title)"
         assert result["description"] == ""
         assert result["buyer"] == ""
@@ -280,50 +285,122 @@ class TestResultsCache:
 # ---------------------------------------------------------------------------
 
 
-def _match(ocid="ocds-001", title="NHS Digital Platform", reason="Directly relates to health interoperability"):
-    return TenderMatch(ocid=ocid, title=title, relevant=True, reason=reason)
+def _match(ocid="ocds-001", notice_id="000001-2026", title="NHS Digital Platform", reason="Directly relates to health interoperability", value=None):
+    return TenderMatch(ocid=ocid, notice_id=notice_id, title=title, relevant=True, reason=reason, value=value)
+
+
+class TestEnrichMatches:
+    def test_populates_notice_id_from_releases(self):
+        releases = [{"id": "045104-2026", "ocid": "ocds-h6vhtk-abc"}]
+        matches = [TenderMatch(ocid="ocds-h6vhtk-abc", title="T", relevant=True, reason="r")]
+        enrich_matches(matches, releases)
+        assert matches[0].notice_id == "045104-2026"
+
+    def test_leaves_notice_id_empty_when_no_matching_release(self):
+        matches = [TenderMatch(ocid="ocds-unknown", title="T", relevant=True, reason="r")]
+        enrich_matches(matches, [])
+        assert matches[0].notice_id == ""
+
+    def test_handles_multiple_matches(self):
+        releases = [
+            {"id": "001-2026", "ocid": "ocds-aaa"},
+            {"id": "002-2026", "ocid": "ocds-bbb"},
+        ]
+        matches = [
+            TenderMatch(ocid="ocds-aaa", title="A", relevant=True, reason="r"),
+            TenderMatch(ocid="ocds-bbb", title="B", relevant=True, reason="r"),
+        ]
+        enrich_matches(matches, releases)
+        assert matches[0].notice_id == "001-2026"
+        assert matches[1].notice_id == "002-2026"
 
 
 class TestRenderHtml:
     def test_returns_string(self):
-        assert isinstance(render_html([], 10, "health"), str)
+        assert isinstance(render_html([], 10, "health", hours=24), str)
 
     def test_contains_viewport_meta_for_mobile(self):
-        html = render_html([], 0, "health")
+        html = render_html([], 0, "health", hours=24)
         assert 'name="viewport"' in html
 
     def test_shows_interests(self):
-        html = render_html([], 5, "health, NHS")
+        html = render_html([], 5, "health, NHS", hours=24)
         assert "health, NHS" in html
 
     def test_shows_match_and_total_count(self):
         matches = [_match()]
-        html = render_html(matches, 10, "health")
+        html = render_html(matches, 10, "health", hours=24)
         assert "1" in html
         assert "10" in html
 
+    def test_shows_hours(self):
+        html = render_html([], 0, "health", hours=48)
+        assert "48" in html
+
     def test_renders_each_match_title(self):
         matches = [_match(title="GP Data Services"), _match(ocid="ocds-002", title="Care Interop API")]
-        html = render_html(matches, 20, "health")
+        html = render_html(matches, 20, "health", hours=24)
         assert "GP Data Services" in html
         assert "Care Interop API" in html
 
-    def test_renders_ocid(self):
-        html = render_html([_match(ocid="ocds-b5fd17-123")], 5, "health")
-        assert "ocds-b5fd17-123" in html
+    def test_does_not_render_ocid(self):
+        html = render_html([_match(ocid="ocds-b5fd17-123")], 5, "health", hours=24)
+        assert "ocds-b5fd17-123" not in html
 
     def test_renders_reason(self):
-        html = render_html([_match(reason="Relates to NHS prevention strategy")], 5, "health")
+        html = render_html([_match(reason="Relates to NHS prevention strategy")], 5, "health", hours=24)
         assert "Relates to NHS prevention strategy" in html
 
+    def test_renders_value_when_present(self):
+        html = render_html([_match(value="500000 GBP")], 1, "health", hours=24)
+        assert "500000 GBP" in html
+
+    def test_omits_value_element_when_none(self):
+        html = render_html([_match(value=None)], 1, "health", hours=24)
+        assert "None" not in html
+
     def test_no_matches_shows_empty_state(self):
-        html = render_html([], 50, "health")
+        html = render_html([], 50, "health", hours=24)
         assert "No matching tenders" in html
 
     def test_escapes_html_in_title(self):
         match = _match(title='<script>alert("xss")</script>')
-        html = render_html([match], 1, "health")
+        html = render_html([match], 1, "health", hours=24)
         assert "<script>" not in html
+
+    def test_renders_tender_link(self):
+        html = render_html([_match(notice_id="069568-2026")], 1, "health", hours=24)
+        assert "https://www.find-tender.service.gov.uk/Notice/069568-2026" in html
+
+    def test_tender_link_is_anchor_tag(self):
+        html = render_html([_match(notice_id="045132-2026")], 1, "health", hours=24)
+        assert '<a href="https://www.find-tender.service.gov.uk/Notice/045132-2026"' in html
+
+
+# ---------------------------------------------------------------------------
+# render_index_html
+# ---------------------------------------------------------------------------
+
+
+class TestRenderIndexHtml:
+    def test_returns_string(self):
+        assert isinstance(render_index_html([]), str)
+
+    def test_contains_link_for_each_date(self):
+        html = render_index_html(["2026-05-15", "2026-05-14"])
+        assert "2026-05-15/index.html" in html
+        assert "2026-05-14/index.html" in html
+
+    def test_dates_sorted_descending(self):
+        html = render_index_html(["2026-05-13", "2026-05-15", "2026-05-14"])
+        pos_15 = html.index("2026-05-15")
+        pos_14 = html.index("2026-05-14")
+        pos_13 = html.index("2026-05-13")
+        assert pos_15 < pos_14 < pos_13
+
+    def test_empty_dates_shows_no_results(self):
+        html = render_index_html([])
+        assert "No results" in html
 
 
 # ---------------------------------------------------------------------------

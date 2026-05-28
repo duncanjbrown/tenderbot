@@ -4,6 +4,7 @@
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import anthropic
@@ -72,8 +73,16 @@ def fetch_tenders(hours_back: int = 24) -> list[dict]:
     )
 
     while url:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
+        for attempt in range(5):
+            resp = requests.get(url, timeout=30)
+            try:
+                resp.raise_for_status()
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429 and attempt < 4:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+            break
         data = resp.json()
 
         batch = data.get("releases", [])

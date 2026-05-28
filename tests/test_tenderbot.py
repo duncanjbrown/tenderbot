@@ -97,6 +97,31 @@ class TestFetchTenders:
             with pytest.raises(requests.HTTPError):
                 fetch_tenders()
 
+    def test_retries_on_429_then_succeeds(self):
+        tender = _release(["tender"])
+        rate_limit_resp = MagicMock(spec=requests.Response)
+        rate_limit_resp.status_code = 429
+        rate_limit_resp.raise_for_status.side_effect = requests.HTTPError(
+            response=rate_limit_resp
+        )
+        success_resp = _make_response([tender])
+        with patch("tenderbot.requests.get", side_effect=[rate_limit_resp, success_resp]):
+            with patch("tenderbot.time.sleep") as mock_sleep:
+                result = fetch_tenders()
+        assert len(result) == 1
+        mock_sleep.assert_called_once()
+
+    def test_raises_after_max_retries_on_429(self):
+        rate_limit_resp = MagicMock(spec=requests.Response)
+        rate_limit_resp.status_code = 429
+        rate_limit_resp.raise_for_status.side_effect = requests.HTTPError(
+            response=rate_limit_resp
+        )
+        with patch("tenderbot.requests.get", return_value=rate_limit_resp):
+            with patch("tenderbot.time.sleep"):
+                with pytest.raises(requests.HTTPError):
+                    fetch_tenders()
+
 
 # ---------------------------------------------------------------------------
 # summarise
